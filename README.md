@@ -1,7 +1,7 @@
 Code relies on Sympy, re, script.integrate.solve_ivp. This project was meant as a Claude Sonnet 4.6 test, but after thorough inspection and testing it became clear that it provided a useful and effective tool for real-world use.
 
 Allows for ordinary- or partial differential equations to be converted from string to solution.
-Ideal for rapid scientific or Machine Learning dataset construction.
+Ideal for rapid scientific and Machine Learning dataset construction, or teaching purposes.
 
 AutoODE allows for the conversion of any order coupled ordinary differential equation via the Parse function, any order dimension agnostic differential equation (Lorenz-96 for example) via Parse_Local, and a function to solve the resulting equations. Also comes with parallelized versions of said functions by adding the prefix Parallel_.
 
