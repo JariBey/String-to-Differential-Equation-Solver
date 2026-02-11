@@ -884,13 +884,29 @@ class AutoPDE:
     Converts human-readable PDE strings into a spatially discretized ODE
     system and solves them numerically using finite differences + solve_ivp.
 
+    Supports arbitrary order in both time and space — write exactly the PDE
+    you mean, and AutoPDE handles the rest.
+
     Workflow
     --------
     1. Write your PDEs as strings set equal to zero, e.g.:
-           "u1_t - 0.01*u1_xx = 0"
+           "u1_t  - 0.01*u1_xx = 0"        (heat equation,  1st order in t)
+           "u1_tt - c**2*u1_xx = 0"         (wave equation,  2nd order in t)
+           "u1_ttt + u1_xxx = 0"            (3rd order in both t and x)
+
        Field variables are u1, u2, ...; t is time, x is space.
-       Time derivative: u1_t
-       Spatial derivatives: u1_x, u1_xx, u1_xxx, u1_xxxx
+
+       Time-derivative notation  (any order):
+           u1_t     = du1/dt       (1st order in time)
+           u1_tt    = d²u1/dt²    (2nd order in time)
+           u1_ttt   = d³u1/dt³    (3rd order in time, etc.)
+
+       Spatial-derivative notation (any order):
+           u1_x     = du1/dx
+           u1_xx    = d²u1/dx²
+           u1_xxx   = d³u1/dx³
+           u1_xxxx  = d⁴u1/dx⁴
+           (higher orders supported for 'periodic' BC)
 
     2. Pass coefficient/forcing functions in a dictionary, e.g.:
            {"f": lambda x, t: np.sin(np.pi * x)}
@@ -898,15 +914,24 @@ class AutoPDE:
     3. Call Parse with spatial domain, grid size, and boundary conditions.
 
     4. Call Solve with initial conditions to integrate.
+       For a field u1 that is nth-order in time, the initial conditions must
+       include all n time-derivative levels at t=0:
+           [u1(x,0), du1/dt(x,0), ..., d^{n-1}u1/dt^{n-1}(x,0), u2(x,0), ...]
 
     Attributes
     ----------
     ODE : callable or None
         Compiled f(t, y) function for solve_ivp.
     order : int
-        Total state dimension (N * n_fields).
+        Total state dimension = sum over fields of (time_order_k * N).
+        For a single 1st-order field:  N.
+        For a single 2nd-order field:  2*N.
+        For two 1st-order fields:      2*N.
     field_vars : list of str
         Detected field variable names, e.g. ['u1', 'u2'].
+    time_orders : dict
+        Maps each field name to its time-derivative order, e.g.
+        {'u1': 2, 'u2': 1} for a wave + advection coupled system.
     N : int
         Number of spatial grid points.
     x_grid : ndarray
@@ -914,18 +939,31 @@ class AutoPDE:
     dx : float
         Grid spacing.
 
-    Example
-    -------
+    Examples
+    --------
+    Heat equation (1st order in t):
+
     >>> pde = AutoPDE()
     >>> pde.Parse("u1_t - 0.01*u1_xx = 0", {}, (0, 1), 100, bc='dirichlet')
     >>> u0 = np.sin(np.pi * pde.x_grid)
-    >>> sol = pde.Solve(u0, (0, 0.5), np.linspace(0, 0.5, 100))
+    >>> sol = pde.Solve(pde.ODE, u0, (0, 0.5), np.linspace(0, 0.5, 100))
+
+    Wave equation (2nd order in t):
+
+    >>> pde = AutoPDE()
+    >>> pde.Parse("u1_tt - 4.0*u1_xx = 0", {}, (0, 1), 200, bc='dirichlet')
+    >>> x = pde.x_grid
+    >>> ic = np.concatenate([np.sin(np.pi*x), np.zeros_like(x)])
+    >>> sol = pde.Solve(pde.ODE, ic, (0, 2), np.linspace(0, 2, 200))
+    >>> u = pde.get_field(sol, 'u1')   # shape (N, n_times)
     """
 
     def __init__(self):
         self.ODE = None
         self.order = 0
         self.field_vars = []
+        self.time_orders = {}    # {field_name: int} — time-derivative order per field
+        self.state_offsets = {}  # {field_name: int} — flat index of field's first state block
         self.N = 0
         self.x_grid = None
         self.dx = 0.0
@@ -951,18 +989,26 @@ class AutoPDE:
                 - t                (time)
                 - x                (space)
 
-            Derivative notation:
-                - u1_t      = du1/dt       (time derivative)
-                - u1_x      = du1/dx       (first spatial derivative)
-                - u1_xx     = d2u1/dx2     (second spatial derivative)
-                - u1_xxx    etc.           (third and higher)
+            Derivative notation (time — any order):
+                - u1_t      = du1/dt           (1st order in time)
+                - u1_tt     = d²u1/dt²         (2nd order in time)
+                - u1_ttt    = d³u1/dt³         (3rd order, etc.)
+
+            Derivative notation (space — any order):
+                - u1_x      = du1/dx           (1st spatial derivative)
+                - u1_xx     = d²u1/dx²         (2nd spatial derivative)
+                - u1_xxx    = d³u1/dx³         (3rd spatial derivative)
+                - u1_xxxx   = d⁴u1/dx⁴        (4th spatial derivative)
 
             Function calls:
                 - f(x, t), g(x, t, u1), etc. must appear in function_dict.
 
             Examples:
-                Heat equation:
+                Heat equation (1st order in t):
                     "u1_t - 0.01*u1_xx = 0"
+
+                Wave equation (2nd order in t):
+                    "u1_tt - 4.0*u1_xx = 0"
 
                 Burgers' equation:
                     "u1_t + u1*u1_x - 0.01*u1_xx = 0"
@@ -970,6 +1016,9 @@ class AutoPDE:
                 Coupled reaction-diffusion:
                     ["u1_t - 0.1*u1_xx + u1*u2 = 0",
                      "u2_t - 0.2*u2_xx - u1*u2 = 0"]
+
+                3rd-order Airy/dispersive:
+                    "u1_t + u1_xxx = 0" 
 
         function_dict : dict
             Maps function names to callables. Arguments in the string
@@ -994,11 +1043,11 @@ class AutoPDE:
                          Supports spatial derivatives up to 4th order.
 
             'dirichlet': Fixed field values at boundaries. N interior points.
-                         Supports spatial derivatives up to 2nd order.
+                         Supports spatial derivatives up to 4th order.
 
             'neumann':   Fixed spatial derivatives at boundaries. N points
                          including endpoints.
-                         Supports spatial derivatives up to 2nd order.
+                         Supports spatial derivatives up to 4th order.
 
         bc_values : dict, optional
             Boundary values per variable: {var_name: (left, right)}.
@@ -1006,6 +1055,14 @@ class AutoPDE:
             For 'neumann': spatial derivatives at boundaries.
             Defaults to (0.0, 0.0) for each variable.
             Ignored for 'periodic'.
+
+        Notes on initial conditions for higher time-order fields
+        ---------------------------------------------------------
+        A field u1 that is nth-order in time requires n initial condition
+        arrays at t=0, concatenated in the flat IC vector in the order:
+            [u1(x,0), du1/dt(x,0), ..., d^{n-1}u1/dt^{n-1}(x,0),
+             u2(x,0), du2/dt(x,0), ..., ...]
+        Use pde.state_offsets[name] to find where each block starts.
 
         Raises
         ------
@@ -1021,7 +1078,7 @@ class AutoPDE:
         field_vars : list of str
             List of detected field variable names (e.g., ['u1', 'u2']).
         order : int
-            Total state dimension (N * n_fields).
+            Total state dimension = sum over all fields of (time_order_k * N).
 
         Notes
         -----
@@ -1063,112 +1120,122 @@ class AutoPDE:
             processed_strings.append(s)
 
         # =================================================================
-        # STEP 2: Detect field variables and their derivative orders
+        # STEP 2: Detect field variables, spatial orders, AND time orders
         # =================================================================
-        # Matches: u1, u1_t, u1_x, u1_xx, u1_xxx, etc.
+        # Matches tokens like: u1, u1_t, u1_tt, u1_x, u1_xx, u1_xxx, etc.
+        # The regex captures the subscript suffix: t+, x+, or none.
         all_tokens = set()
         for s in processed_strings:
             for m in re.finditer(
-                r'(?<![a-zA-Z_\d])u(\d+)(?:_(t|x+))?(?![a-zA-Z\d])', s
+                r'(?<![a-zA-Z_\d])u(\d+)(?:_(t+|x+))?(?![a-zA-Z\d])', s
             ):
                 name = f'u{m.group(1)}'
-                deriv_type = m.group(2)
+                deriv_type = m.group(2)   # 't', 'tt', 'x', 'xx', etc., or None
                 all_tokens.add((name, deriv_type))
 
         field_var_set = set()
-        max_spatial_order = {}
+        max_spatial_order = {}  # {name: int}  highest spatial derivative order
+        max_time_order = {}     # {name: int}  highest time derivative order
 
         for name, deriv_type in all_tokens:
             field_var_set.add(name)
-            if deriv_type is not None and deriv_type != 't':
-                order = len(deriv_type)
-                max_spatial_order[name] = max(
-                    max_spatial_order.get(name, 0), order
-                )
-            else:
+            if deriv_type is None:
                 max_spatial_order.setdefault(name, 0)
+                max_time_order.setdefault(name, 0)
+            elif set(deriv_type) == {'t'}:
+                # Pure time derivative: order = number of 't' chars
+                t_ord = len(deriv_type)
+                max_time_order[name] = max(max_time_order.get(name, 0), t_ord)
+                max_spatial_order.setdefault(name, 0)
+            else:
+                # Spatial derivative: count 'x' chars
+                x_ord = len(deriv_type)
+                max_spatial_order[name] = max(max_spatial_order.get(name, 0), x_ord)
+                max_time_order.setdefault(name, 0)
 
         field_vars = sorted(field_var_set, key=lambda n: int(n[1:]))
         self.field_vars = field_vars
         n_fields = len(field_vars)
 
         # =================================================================
-        # STEP 3: Create sympy symbols for each field and derivative
+        # STEP 3: Create sympy symbols for spatial AND time derivatives
         # =================================================================
-        # u1       -> S0_u1   (field value)
-        # u1_x     -> S1_u1   (first spatial derivative)
-        # u1_xx    -> S2_u1   (second spatial derivative)
-        # u1_t     -> St_u1   (time derivative — what we solve for)
-        var_symbols = {}
-        time_deriv_syms = {}
+        # Spatial:  u1       -> S0_u1   (field value)
+        #           u1_x     -> S1_u1   (1st spatial derivative)
+        #           u1_xx    -> S2_u1   (2nd spatial derivative)
+        # Time:     u1_t     -> St1_u1  (1st time derivative)
+        #           u1_tt    -> St2_u1  (2nd time derivative, solve target)
+        #           u1_ttt   -> St3_u1  (3rd time derivative, etc.)
+        #
+        # The highest time-derivative symbol is what we solve for.
+
+        var_symbols = {}        # var_symbols[name][k] = Symbol for k-th spatial deriv
+        time_deriv_syms = {}    # time_deriv_syms[name][k] = Symbol for k-th time deriv
 
         for name in field_vars:
             var_symbols[name] = {}
-            max_o = max_spatial_order.get(name, 0)
-            for k in range(max_o + 1):
+            max_so = max_spatial_order.get(name, 0)
+            for k in range(max_so + 1):
                 safe = f'S{k}_{name}'
                 var_symbols[name][k] = sp.Symbol(safe)
                 local_dict[safe] = var_symbols[name][k]
 
-            safe_t = f'St_{name}'
-            time_deriv_syms[name] = sp.Symbol(safe_t)
-            local_dict[safe_t] = time_deriv_syms[name]
+            time_deriv_syms[name] = {}
+            max_to = max(max_time_order.get(name, 1), 1)
+            for k in range(1, max_to + 1):
+                safe_t = f'St{k}_{name}'
+                time_deriv_syms[name][k] = sp.Symbol(safe_t)
+                local_dict[safe_t] = time_deriv_syms[name][k]
 
         # =================================================================
         # STEP 4: Preprocess strings — convert PDE notation to safe names
         # =================================================================
-        # "u1_xx - u1" becomes "S2_u1 - S0_u1"
+        # "u1_tt - c**2*u1_xx" becomes "St2_u1 - c**2*S2_u1"
         sorted_vars = sorted(field_vars, key=len, reverse=True)
 
         def preprocess(s):
-            """Replace u1_xx etc. with safe sympy names like S2_u1."""
             result = []
             i = 0
             while i < len(s):
                 matched = False
                 for name in sorted_vars:
                     if s[i:i + len(name)] == name:
-                        # Word boundary check
                         if i > 0 and (s[i - 1].isalnum() or s[i - 1] == '_'):
                             continue
 
                         j = i + len(name)
 
-                        # Check for derivative subscript (_t or _x+)
                         if j < len(s) and s[j] == '_':
                             k = j + 1
-                            # Time derivative
+                            # Time derivative: one or more 't' chars
                             if k < len(s) and s[k] == 't':
-                                end = k + 1
-                                if end >= len(s) or not (
-                                    s[end].isalnum() or s[end] == '_'
-                                ):
-                                    result.append(f'St_{name}')
-                                    i = end
+                                n_t = 0
+                                while k < len(s) and s[k] == 't':
+                                    n_t += 1
+                                    k += 1
+                                if k >= len(s) or not (s[k].isalnum() or s[k] == '_'):
+                                    result.append(f'St{n_t}_{name}')
+                                    i = k
                                     matched = True
                                     break
-                            # Spatial derivative
+                            # Spatial derivative: one or more 'x' chars
                             elif k < len(s) and s[k] == 'x':
                                 n_x = 0
                                 while k < len(s) and s[k] == 'x':
                                     n_x += 1
                                     k += 1
-                                if k >= len(s) or not (
-                                    s[k].isalnum() or s[k] == '_'
-                                ):
+                                if k >= len(s) or not (s[k].isalnum() or s[k] == '_'):
                                     result.append(f'S{n_x}_{name}')
                                     i = k
                                     matched = True
                                     break
 
-                        # Variable without subscript
-                        if j >= len(s) or not (
-                            s[j].isalnum() or s[j] == '_'
-                        ):
-                            result.append(f'S0_{name}')
-                            i = j
-                            matched = True
-                            break
+                        if not matched:
+                            if j >= len(s) or not (s[j].isalnum() or s[j] == '_'):
+                                result.append(f'S0_{name}')
+                                i = j
+                                matched = True
+                                break
 
                 if not matched:
                     result.append(s[i])
@@ -1176,29 +1243,32 @@ class AutoPDE:
             return ''.join(result)
 
         # =================================================================
-        # STEP 5: Parse each equation and solve for the time derivative
+        # STEP 5: Parse each equation and solve for the highest time deriv
         # =================================================================
-        parsed_equations = []
+        parsed_equations = []   # [(field_name, time_order, rhs_sympy_expr)]
         for s in processed_strings:
             s = preprocess(s)
             expr = parse_expr(s, local_dict=local_dict)
 
             target_var = None
+            target_tord = 0
             for name in field_vars:
-                if expr.has(time_deriv_syms[name]):
-                    target_var = name
-                    break
+                max_to = max(max_time_order.get(name, 1), 1)
+                for k in range(max_to, 0, -1):
+                    if expr.has(time_deriv_syms[name][k]):
+                        if k > target_tord:
+                            target_var, target_tord = name, k
+                        break
 
             if target_var is None:
-                raise ValueError(f"No time derivative (u_t) found in: {s}")
+                raise ValueError(f"No time derivative (u_t, u_tt, ...) found in: {s}")
 
-            solved = sp.solve(expr, time_deriv_syms[target_var])
+            sym_to_solve = time_deriv_syms[target_var][target_tord]
+            solved = sp.solve(expr, sym_to_solve)
             if not solved:
-                raise ValueError(
-                    f"Cannot isolate {time_deriv_syms[target_var]} in: {s}"
-                )
+                raise ValueError(f"Cannot isolate {sym_to_solve} in: {s}")
 
-            parsed_equations.append((target_var, solved[0]))
+            parsed_equations.append((target_var, target_tord, solved[0]))
 
         # =================================================================
         # STEP 6: Build spatial grid
@@ -1222,92 +1292,161 @@ class AutoPDE:
         self.N = N
         self.x_grid = x_grid
         self.dx = dx
-        self.order = N * n_fields
 
         if bc_values is None:
             bc_values = {}
 
         # =================================================================
-        # STEP 7: Build finite difference operators
+        # STEP 7: Finite difference operators (all BCs, up to 4th order)
         # =================================================================
-        # Central finite differences for spatial derivatives.
-        # Periodic: np.roll handles wrap-around.
-        # Dirichlet/Neumann: ghost nodes at boundaries.
-
         def _build_fd_ops(bc_type, dx_val, n_pts, bv):
-            """Build spatial derivative operators for one field variable."""
             ops = {}
             if bc_type == 'periodic':
-                ops[1] = lambda u: (
-                    np.roll(u, -1) - np.roll(u, 1)
-                ) / (2 * dx_val)
-                ops[2] = lambda u: (
-                    np.roll(u, -1) - 2 * u + np.roll(u, 1)
-                ) / dx_val**2
+                ops[1] = lambda u: (np.roll(u, -1) - np.roll(u, 1)) / (2 * dx_val)
+                ops[2] = lambda u: (np.roll(u, -1) - 2 * u + np.roll(u, 1)) / dx_val**2
                 ops[3] = lambda u: (
-                    np.roll(u, -2) - 2 * np.roll(u, -1)
-                    + 2 * np.roll(u, 1) - np.roll(u, 2)
+                    np.roll(u, -2) - 2*np.roll(u, -1) + 2*np.roll(u, 1) - np.roll(u, 2)
                 ) / (2 * dx_val**3)
                 ops[4] = lambda u: (
-                    np.roll(u, -2) - 4 * np.roll(u, -1) + 6 * u
-                    - 4 * np.roll(u, 1) + np.roll(u, 2)
+                    np.roll(u, -2) - 4*np.roll(u, -1) + 6*u - 4*np.roll(u, 1) + np.roll(u, 2)
                 ) / dx_val**4
 
             elif bc_type == 'dirichlet':
                 lv, rv = bv
 
                 def d1_dir(u):
-                    d = np.empty_like(u)
+                    d = np.empty_like(u, dtype=float)
                     if n_pts == 1:
                         d[0] = (rv - lv) / (2 * dx_val)
                     else:
-                        d[0] = (u[1] - lv) / (2 * dx_val)
-                        d[-1] = (rv - u[-2]) / (2 * dx_val)
+                        d[0]  = (u[1]  - lv)   / (2 * dx_val)
+                        d[-1] = (rv    - u[-2]) / (2 * dx_val)
                         if n_pts > 2:
                             d[1:-1] = (u[2:] - u[:-2]) / (2 * dx_val)
                     return d
 
                 def d2_dir(u):
-                    d = np.empty_like(u)
+                    d = np.empty_like(u, dtype=float)
                     if n_pts == 1:
-                        d[0] = (rv - 2 * u[0] + lv) / dx_val**2
+                        d[0] = (rv - 2*u[0] + lv) / dx_val**2
                     else:
-                        d[0] = (u[1] - 2 * u[0] + lv) / dx_val**2
-                        d[-1] = (rv - 2 * u[-1] + u[-2]) / dx_val**2
+                        d[0]  = (u[1]  - 2*u[0]  + lv)    / dx_val**2
+                        d[-1] = (rv    - 2*u[-1]  + u[-2]) / dx_val**2
                         if n_pts > 2:
-                            d[1:-1] = (
-                                u[2:] - 2 * u[1:-1] + u[:-2]
-                            ) / dx_val**2
+                            d[1:-1] = (u[2:] - 2*u[1:-1] + u[:-2]) / dx_val**2
+                    return d
+
+                def d3_dir(u):
+                    # Odd-reflection ghost nodes: u[-1]=2*lv-u[1], u[N]=2*rv-u[-2]
+                    d = np.empty_like(u, dtype=float)
+                    gl = 2*lv - (u[1]  if n_pts > 1 else rv)
+                    gr = 2*rv - (u[-2] if n_pts > 1 else lv)
+                    if n_pts == 1:
+                        d[0] = (-gl + 2*lv - 2*rv + gr) / (2*dx_val**3)
+                    else:
+                        u2_l = u[2] if n_pts > 2 else rv
+                        u3_m = u[-3] if n_pts > 2 else lv
+                        d[0]  = (-gl + 2*lv   - 2*u[1]  + u2_l) / (2*dx_val**3)
+                        d[-1] = (-u3_m + 2*u[-2] - 2*rv   + gr)  / (2*dx_val**3)
+                        if n_pts > 2:
+                            u3_l = u[3] if n_pts > 3 else rv
+                            u4_m = u[-4] if n_pts > 3 else lv
+                            d[1]  = (-lv    + 2*u[0]  - 2*u[2]  + u3_l) / (2*dx_val**3)
+                            d[-2] = (-u4_m  + 2*u[-3] - 2*u[-1] + rv)   / (2*dx_val**3)
+                            if n_pts > 4:
+                                d[2:-2] = (-u[:-4] + 2*u[1:-3] - 2*u[3:-1] + u[4:]) / (2*dx_val**3)
+                    return d
+
+                def d4_dir(u):
+                    d = np.empty_like(u, dtype=float)
+                    gl = 2*lv - (u[1]  if n_pts > 1 else rv)
+                    gr = 2*rv - (u[-2] if n_pts > 1 else lv)
+                    if n_pts == 1:
+                        d[0] = (gl - 4*lv + 6*u[0] - 4*rv + gr) / dx_val**4
+                    else:
+                        u2_l = u[2]  if n_pts > 2 else rv
+                        u3_m = u[-3] if n_pts > 2 else lv
+                        d[0]  = (gl    - 4*lv   + 6*u[0]  - 4*u[1]  + u2_l)  / dx_val**4
+                        d[-1] = (u3_m  - 4*u[-2]+ 6*u[-1] - 4*rv    + gr)    / dx_val**4
+                        if n_pts > 2:
+                            u3_l = u[3] if n_pts > 3 else rv
+                            u4_m = u[-4] if n_pts > 3 else lv
+                            d[1]  = (lv   - 4*u[0]  + 6*u[1]  - 4*u[2]  + u3_l) / dx_val**4
+                            d[-2] = (u4_m - 4*u[-3] + 6*u[-2] - 4*u[-1] + rv)   / dx_val**4
+                            if n_pts > 4:
+                                d[2:-2] = (u[:-4] - 4*u[1:-3] + 6*u[2:-2] - 4*u[3:-1] + u[4:]) / dx_val**4
                     return d
 
                 ops[1] = d1_dir
                 ops[2] = d2_dir
+                ops[3] = d3_dir
+                ops[4] = d4_dir
 
             elif bc_type == 'neumann':
                 ld, rd = bv
 
                 def d1_neu(u):
-                    d = np.empty_like(u)
-                    d[0] = ld
+                    d = np.empty_like(u, dtype=float)
+                    d[0]  = ld
                     d[-1] = rd
                     if n_pts > 2:
                         d[1:-1] = (u[2:] - u[:-2]) / (2 * dx_val)
                     return d
 
                 def d2_neu(u):
-                    ghost_l = u[1] - 2 * dx_val * ld
-                    ghost_r = u[-2] + 2 * dx_val * rd
-                    d = np.empty_like(u)
-                    d[0] = (u[1] - 2 * u[0] + ghost_l) / dx_val**2
-                    d[-1] = (ghost_r - 2 * u[-1] + u[-2]) / dx_val**2
+                    ghost_l = u[1]  - 2*dx_val*ld
+                    ghost_r = u[-2] + 2*dx_val*rd
+                    d = np.empty_like(u, dtype=float)
+                    d[0]  = (u[1]    - 2*u[0]  + ghost_l) / dx_val**2
+                    d[-1] = (ghost_r - 2*u[-1] + u[-2])   / dx_val**2
                     if n_pts > 2:
-                        d[1:-1] = (
-                            u[2:] - 2 * u[1:-1] + u[:-2]
-                        ) / dx_val**2
+                        d[1:-1] = (u[2:] - 2*u[1:-1] + u[:-2]) / dx_val**2
+                    return d
+
+                def d3_neu(u):
+                    ghost_l = u[1]  - 2*dx_val*ld
+                    ghost_r = u[-2] + 2*dx_val*rd
+                    d = np.empty_like(u, dtype=float)
+                    if n_pts == 1:
+                        d[0] = 0.0
+                    else:
+                        u2_l = u[2] if n_pts > 2 else ghost_r
+                        u3_m = u[-3] if n_pts > 2 else ghost_l
+                        d[0]  = (-ghost_l + 2*u[0]  - 2*u[1]   + u2_l) / (2*dx_val**3)
+                        d[-1] = (-u3_m    + 2*u[-2] - 2*u[-1]  + ghost_r) / (2*dx_val**3)
+                        if n_pts > 2:
+                            u3_l = u[3] if n_pts > 3 else ghost_r
+                            u4_m = u[-4] if n_pts > 3 else ghost_l
+                            d[1]  = (-ghost_l + 2*u[0]  - 2*u[2]  + u3_l) / (2*dx_val**3)
+                            d[-2] = (-u4_m    + 2*u[-3] - 2*u[-1] + ghost_r) / (2*dx_val**3)
+                            if n_pts > 4:
+                                d[2:-2] = (-u[:-4] + 2*u[1:-3] - 2*u[3:-1] + u[4:]) / (2*dx_val**3)
+                    return d
+
+                def d4_neu(u):
+                    ghost_l = u[1]  - 2*dx_val*ld
+                    ghost_r = u[-2] + 2*dx_val*rd
+                    d = np.empty_like(u, dtype=float)
+                    if n_pts == 1:
+                        d[0] = 0.0
+                    else:
+                        u2_l = u[2]  if n_pts > 2 else ghost_r
+                        u3_m = u[-3] if n_pts > 2 else ghost_l
+                        d[0]  = (ghost_l - 4*u[0]  + 6*u[0]  - 4*u[1]  + u2_l)  / dx_val**4
+                        d[-1] = (u3_m    - 4*u[-2] + 6*u[-1] - 4*u[-1] + ghost_r) / dx_val**4
+                        if n_pts > 2:
+                            u3_l = u[3] if n_pts > 3 else ghost_r
+                            u4_m = u[-4] if n_pts > 3 else ghost_l
+                            d[1]  = (ghost_l - 4*u[0]  + 6*u[1]  - 4*u[2]  + u3_l) / dx_val**4
+                            d[-2] = (u4_m    - 4*u[-3] + 6*u[-2] - 4*u[-1] + ghost_r) / dx_val**4
+                            if n_pts > 4:
+                                d[2:-2] = (u[:-4] - 4*u[1:-3] + 6*u[2:-2] - 4*u[3:-1] + u[4:]) / dx_val**4
                     return d
 
                 ops[1] = d1_neu
                 ops[2] = d2_neu
+                ops[3] = d3_neu
+                ops[4] = d4_neu
 
             return ops
 
@@ -1317,45 +1456,107 @@ class AutoPDE:
             fd_ops[name] = _build_fd_ops(bc, dx, N, bv)
 
         # =================================================================
-        # STEP 8: Lambdify RHS and build the system function
+        # STEP 8: State-vector layout for nth-order-in-time fields
         # =================================================================
-        # Argument order: [x, t, S0_u1, S1_u1, ..., S0_u2, ..., PHFN0, ...]
+        # A field u_k of time-order m_k occupies m_k*N consecutive entries:
+        #   [u_k^(0), u_k^(1), ..., u_k^(m_k-1)]  each of length N.
+        #
+        # state_offsets_map[name] = flat index where u_k^(0) starts.
+        # time_orders_map[name]   = m_k.
+
+        time_orders_map = {}
+        state_offsets_map = {}
+        flat_offset = 0
+        for name in field_vars:
+            m = max(max_time_order.get(name, 1), 1)
+            time_orders_map[name] = m
+            state_offsets_map[name] = flat_offset
+            flat_offset += m * N
+        total_states = flat_offset
+
+        self.time_orders = time_orders_map
+        self.state_offsets = state_offsets_map
+        self.order = total_states
+
+        # =================================================================
+        # STEP 9: Lambdify RHS and build the semi-discrete system function
+        # =================================================================
+        # Lambdified argument order:
+        #   [x, t,  S0_u1, S1_u1, ..., S0_u2, ...,
+        #    Lt1_u1, ..., Lt{m-1}_u1, ...,    <- lower time-deriv states
+        #    PHFN0, ...]
+
         all_syms = [x_sym, t_sym]
         for name in field_vars:
-            max_o = max_spatial_order.get(name, 0)
-            for k in range(max_o + 1):
+            max_so = max_spatial_order.get(name, 0)
+            for k in range(max_so + 1):
                 all_syms.append(var_symbols[name][k])
+
+        # Add symbols for lower-order time derivatives (for cross-field coupling
+        # and sub-highest-order references in equations).
+        time_state_syms = {}   # {(name, k): Symbol}
+        for name in field_vars:
+            m = time_orders_map[name]
+            for k in range(1, m):
+                safe_lt = f'Lt{k}_{name}'
+                sym = sp.Symbol(safe_lt)
+                local_dict[safe_lt] = sym
+                time_state_syms[(name, k)] = sym
+                all_syms.append(sym)
+
         ph_list = list(func_placeholders.keys())
         all_syms.extend(ph_list)
 
-        lambdified_rhs = []
-        for target_var, rhs_expr in parsed_equations:
-            fn = sp.lambdify(all_syms, rhs_expr, modules='numpy')
-            lambdified_rhs.append((target_var, fn))
+        # Substitute time_state_syms into rhs expressions where St{k} symbols
+        # appear for k < m (they are state variables, not inputs from lambdify).
+        # Map St{k}_name -> Lt{k}_name for k < m so lambdify sees the right syms.
+        substitution_map = {}
+        for name in field_vars:
+            m = time_orders_map[name]
+            for k in range(1, m):
+                old_sym = time_deriv_syms[name][k]
+                new_sym = time_state_syms[(name, k)]
+                substitution_map[old_sym] = new_sym
 
-        field_idx = {name: i for i, name in enumerate(field_vars)}
+        lambdified_rhs = []
+        for target_var, target_tord, rhs_expr in parsed_equations:
+            rhs_subst = rhs_expr.subs(substitution_map) if substitution_map else rhs_expr
+            fn = sp.lambdify(all_syms, rhs_subst, modules='numpy')
+            lambdified_rhs.append((target_var, target_tord, fn))
 
         def system(t_val, y_flat):
-            """RHS f(t, y) for the semi-discrete PDE system."""
             dydt = np.zeros_like(y_flat)
 
-            # Extract field arrays from flat state vector
-            fields = {}
+            # Extract all field time-derivative states from flat vector
+            # field_states[name][j] = u_k^{(j)}  (array of length N)
+            field_states = {}
             for name in field_vars:
-                fi = field_idx[name]
-                fields[name] = y_flat[fi * N:(fi + 1) * N]
+                m = time_orders_map[name]
+                off = state_offsets_map[name]
+                field_states[name] = [
+                    y_flat[off + j*N : off + (j+1)*N]
+                    for j in range(m)
+                ]
 
-            # Compute spatial derivatives via finite differences
+            # Chain rules: d(u^{(j)})/dt = u^{(j+1)}  for j = 0 .. m-2
+            for name in field_vars:
+                m = time_orders_map[name]
+                off = state_offsets_map[name]
+                for j in range(m - 1):
+                    dydt[off + j*N : off + (j+1)*N] = field_states[name][j + 1]
+
+            # Spatial derivatives of the zeroth state (the physical field)
             spatial = {}
             for name in field_vars:
-                spatial[name] = {0: fields[name]}
+                u_field = field_states[name][0]
+                spatial[name] = {0: u_field}
                 for k in range(1, max_spatial_order.get(name, 0) + 1):
                     if k not in fd_ops[name]:
                         raise ValueError(
                             f"Spatial derivative order {k} not supported "
                             f"for bc='{bc}'"
                         )
-                    spatial[name][k] = fd_ops[name][k](fields[name])
+                    spatial[name][k] = fd_ops[name][k](u_field)
 
             # Evaluate placeholder functions
             ph_vals = []
@@ -1367,31 +1568,38 @@ class AutoPDE:
                         fargs.append(t_val)
                     elif a == 'x':
                         fargs.append(x_grid)
-                    elif a in fields:
-                        fargs.append(fields[a])
+                    elif a in field_states:
+                        fargs.append(field_states[a][0])
                     else:
-                        raise ValueError(
-                            f"Unknown argument '{a}' in {fname}(...)"
-                        )
+                        raise ValueError(f"Unknown argument '{a}' in {fname}(...)")
                 ph_vals.append(function_dict[fname](*fargs))
 
-            # Evaluate each RHS equation
-            for target_var, fn in lambdified_rhs:
-                args = [x_grid, t_val]
-                for name in field_vars:
-                    for k in range(max_spatial_order.get(name, 0) + 1):
-                        args.append(spatial[name][k])
-                args.extend(ph_vals)
+            # Build argument list for lambdified RHS
+            base_args = [x_grid, t_val]
+            for name in field_vars:
+                max_so = max_spatial_order.get(name, 0)
+                for k in range(max_so + 1):
+                    base_args.append(spatial[name][k])
+            # Lower time-derivative states (for equations that couple through them)
+            for name in field_vars:
+                m = time_orders_map[name]
+                for k in range(1, m):
+                    base_args.append(field_states[name][k])
+            base_args.extend(ph_vals)
 
-                fi = field_idx[target_var]
-                dydt[fi * N:(fi + 1) * N] = fn(*args)
+            # Fill the highest time-derivative slot for each field
+            for target_var, target_tord, fn in lambdified_rhs:
+                rhs_val = fn(*base_args)
+                off = state_offsets_map[target_var]
+                m   = time_orders_map[target_var]
+                dydt[off + (m-1)*N : off + m*N] = rhs_val
 
             return dydt
 
         self.ODE = system
-        self.order = n_fields * N
-        
+
         return system, field_vars, self.order
+
 
     def Solve(self, ODE, initial_conditions, t_span, t_eval, method='RK45', **kwargs):
         """
@@ -1433,11 +1641,17 @@ class AutoPDE:
         if ic.ndim == 2:
             ic = ic.ravel()
 
-        if len(ic) != self.order:
+        expected = self.order   # = sum of (time_order_k * N) for all fields
+        if len(ic) != expected:
+            parts = ", ".join(
+                f"{name}: {self.time_orders.get(name,1)}x{self.N}"
+                for name in self.field_vars
+            )
             raise ValueError(
-                f"Expected {self.order} initial values "
-                f"({len(self.field_vars)} fields x {self.N} points), "
-                f"got {len(ic)}"
+                f"Expected {expected} initial values "
+                f"({parts}), got {len(ic)}. "
+                f"For a field u_k of time-order m, provide m arrays of "
+                f"length N: [u_k(x,0), du_k/dt(x,0), ..., d^(m-1)u_k/dt^(m-1)(x,0)]."
             )
 
         return solve_ivp(
@@ -1445,9 +1659,10 @@ class AutoPDE:
             t_eval=t_eval, method=method, dense_output=True, **kwargs
         )
 
-    def get_field(self, sol, var_name=None, var_idx=0):
+    def get_field(self, sol, var_name=None, var_idx=0, time_deriv=0):
         """
-        Extract a single field from the solution.
+        Extract a single field (or one of its time-derivative states) from
+        the solution.
 
         Parameters
         ----------
@@ -1456,15 +1671,35 @@ class AutoPDE:
         var_name : str, optional
             Field name, e.g. 'u1'. Overrides var_idx if given.
         var_idx : int, optional
-            Index into self.field_vars. Default 0.
+            Index into self.field_vars. Default 0. Ignored when var_name given.
+        time_deriv : int, optional
+            Which time-derivative level to extract. Default 0 (the field itself).
+              0  -> u_k(x, t)
+              1  -> du_k/dt(x, t)   (only for 2nd-order-in-time or higher fields)
+              k  -> d^k u_k / dt^k  (must be < time_order of that field)
 
         Returns
         -------
         ndarray of shape (N, n_times)
+            The requested field or derivative at all stored times.
+
+        Raises
+        ------
+        IndexError
+            If time_deriv >= time_order of the requested field.
         """
         if var_name is not None:
             var_idx = self.field_vars.index(var_name)
-        return sol.y[var_idx * self.N:(var_idx + 1) * self.N, :]
+        name = self.field_vars[var_idx]
+        m   = self.time_orders.get(name, 1)
+        off = self.state_offsets.get(name, var_idx * self.N)
+        if time_deriv >= m:
+            raise IndexError(
+                f"Field '{name}' is order {m} in time; "
+                f"time_deriv={time_deriv} is out of range (max {m-1})."
+            )
+        start = off + time_deriv * self.N
+        return sol.y[start : start + self.N, :]
 
     @staticmethod
     def _parse_single(pde_strings, function_dict, x_span, N, bc, bc_values):
@@ -1797,6 +2032,120 @@ if __name__ == "__main__":
     axes[2].set_xlim(-L, L)
 
     fig.suptitle('Double Slit Experiment — Paraxial Wave Propagation (AutoPDE)',
-                 fontsize=13, y=0.98)  # <-- Increased y to avoid cutoff
+                 fontsize=13, y=0.98)
+    plt.tight_layout()
+
+    # =========================================================================
+    # Wave Equation — AutoPDE  (2nd order in both time AND space)
+    # =========================================================================
+    # The 1-D wave equation:
+    #
+    #   u_tt = c² · u_xx
+    #
+    # is 2nd-order in time (u_tt) and 2nd-order in space (u_xx).
+    # AutoPDE now handles this natively: Parse detects "u1_tt" and builds the
+    # extended state vector  [u1, u1_t]  of length 2*N.
+    #
+    # Exact solution for the chosen IC (standing-wave initial displacement,
+    # zero initial velocity, Dirichlet BCs):
+    #   u(x, t) = sin(n*π*x/L) · cos(n*π*c*t/L)
+    #
+    # We verify numerics against this exact solution.
+
+    print("\n" + "=" * 60)
+    print("Wave Equation  u_tt = c²·u_xx  (AutoPDE, 2nd order in time)")
+    print("=" * 60)
+
+    # --- Parameters ---
+    c_wave  = 2.0          # wave speed
+    L_wave  = 1.0          # domain [0, L]
+    N_wave  = 200          # spatial grid points (interior, Dirichlet)
+    T_wave  = 2.0          # integrate to t = T
+    n_mode  = 2            # standing wave mode number
+    n_t     = 500          # stored time points
+
+    # --- Parse ---
+    pde_wave = AutoPDE()
+    ode_wave, fvars_wave, ord_wave = pde_wave.Parse(
+        f"u1_tt - {c_wave**2}*u1_xx = 0",   # 2nd-order in time!
+        {},
+        (0.0, L_wave), N_wave,
+        bc='dirichlet',                        # u1 = 0 at x = 0 and x = L
+    )
+    x_wave = pde_wave.x_grid
+
+    print(f"  State dimension: {ord_wave}  (= 2 × N = 2 × {N_wave})")
+    print(f"  time_orders: {pde_wave.time_orders}")
+
+    # --- Initial conditions ---
+    # u1(x, 0) = sin(n·π·x/L)    <- initial displacement
+    # u1_t(x, 0) = 0              <- zero initial velocity
+    u1_0   = np.sin(n_mode * np.pi * x_wave / L_wave)
+    u1t_0  = np.zeros(N_wave)
+    ic_wave = np.concatenate([u1_0, u1t_0])   # length 2*N
+
+    # --- Solve ---
+    t_eval_wave = np.linspace(0, T_wave, n_t)
+    print(f"  Integrating over t ∈ [0, {T_wave}] ...")
+    t0 = time.perf_counter()
+    sol_wave = pde_wave.Solve(
+        ode_wave, ic_wave, (0, T_wave), t_eval_wave,
+        method='DOP853', rtol=1e-9, atol=1e-11,
+    )
+    print(f"  Solve time: {time.perf_counter() - t0:.3f} s")
+
+    # --- Extract fields ---
+    u_num  = pde_wave.get_field(sol_wave, 'u1', time_deriv=0)  # displacement
+    ut_num = pde_wave.get_field(sol_wave, 'u1', time_deriv=1)  # velocity
+
+    # --- Exact solution ---
+    omega = n_mode * np.pi * c_wave / L_wave
+    u_exact = (np.sin(n_mode * np.pi * x_wave[:, None] / L_wave)
+               * np.cos(omega * t_eval_wave[None, :]))
+
+    max_err = np.max(np.abs(u_num - u_exact))
+    print(f"  Max pointwise error vs exact: {max_err:.2e}")
+
+    # --- Visualisation ---
+    fig_wave, axes_wave = plt.subplots(1, 3, figsize=(17, 4))
+
+    # (a) Space-time map of displacement
+    im_w = axes_wave[0].imshow(
+        u_num, aspect='auto', origin='lower',
+        extent=[0, T_wave, 0, L_wave], cmap='RdBu_r',
+        vmin=-1.1, vmax=1.1,
+    )
+    axes_wave[0].set_xlabel('t')
+    axes_wave[0].set_ylabel('x')
+    axes_wave[0].set_title(f'u(x, t)  — mode {n_mode},  c={c_wave}')
+    plt.colorbar(im_w, ax=axes_wave[0], shrink=0.85)
+
+    # (b) Several snapshots vs exact
+    snap_times = [0.0, 0.25, 0.5, 0.75, 1.0]
+    colors = plt.cm.viridis(np.linspace(0, 1, len(snap_times)))
+    for col, ts in zip(colors, snap_times):
+        ti = np.argmin(np.abs(t_eval_wave - ts))
+        axes_wave[1].plot(x_wave, u_num[:, ti], color=col, lw=2,
+                          label=f't={ts:.2f}')
+        axes_wave[1].plot(x_wave, u_exact[:, ti], color=col,
+                          lw=1, ls='--', alpha=0.7)
+    axes_wave[1].set_xlabel('x')
+    axes_wave[1].set_ylabel('u(x, t)')
+    axes_wave[1].set_title('Snapshots: numerical (solid) vs exact (dashed)')
+    axes_wave[1].legend(fontsize=8)
+
+    # (c) Pointwise error over time
+    err_over_time = np.max(np.abs(u_num - u_exact), axis=0)
+    axes_wave[2].semilogy(t_eval_wave, err_over_time, 'k-', lw=1)
+    axes_wave[2].set_xlabel('t')
+    axes_wave[2].set_ylabel('Max |error|')
+    axes_wave[2].set_title('Max pointwise error vs exact solution')
+    axes_wave[2].grid(True, which='both', alpha=0.3)
+
+    fig_wave.suptitle(
+        f'Wave Equation  u_tt = {c_wave**2}·u_xx  '
+        f'(AutoPDE, 2nd-order in time, N={N_wave})',
+        fontsize=12,
+    )
     plt.tight_layout()
     plt.show()
