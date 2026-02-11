@@ -23,6 +23,7 @@ PDE example:
     >>> u0 = np.sin(np.pi * pde.x_grid)
     >>> sol = pde.Solve(u0, (0, 0.5), np.linspace(0, 0.5, 100))
 
+Detailed documentation is present in the class functions.
 
 __main__ contains a Lorenz63 dataset generated via the AutoODE class, and the Double Slit Experiment generated via the AutoPDE class.
 
