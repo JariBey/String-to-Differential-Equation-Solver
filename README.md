@@ -5,7 +5,7 @@ Ideal for rapid scientific or Machine Learning dataset construction.
 
 AutoODE allows for the conversion of any order coupled ordinary differential equation via the Parse function, any order dimension agnostic differential equation (Lorenz-96 for example) via Parse_Local, and a function to solve the resulting equations. Also comes with parallelized versions of said functions by adding the prefix Parallel_.
 
-AutoPDE allows for the conversion of any order coupled 1D partial differential equation via the Parse function, and a function to solve the resulting equations. Because it allows for coupled equations, it can also be used for any dimension partial differential equation. Also comes with parallelized versions of said functions by adding the prefix Parallel_.
+AutoPDE allows for the conversion of any order coupled 1D partial differential equation via the Parse function, and a function to solve the resulting equations. Because it allows for coupled equations, it can also be used for vector-valued partial differential equation. Also comes with parallelized versions of said functions by adding the prefix Parallel_.
 
 ODE example:
 
