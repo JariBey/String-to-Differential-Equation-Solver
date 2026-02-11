@@ -18,9 +18,10 @@ PDE example:
     >>> sol = pde.Solve(u0, (0, 0.5), np.linspace(0, 0.5, 100))
 
 
-__main__ contains a Double Slit experiment, generated via the AutoPDE class.
+__main__ contains a Lorenz63 dataset generated via the AutoODE class, and the Double Slit Experiment generated via the AutoPDE class.
 
 Result:
 
-  
+<img width="1400" height="500" alt="L63E" src="https://github.com/user-attachments/assets/ae1c71dc-966a-4258-b19f-63a047419664" />
+
 <img width="1700" height="500" alt="DSE" src="https://github.com/user-attachments/assets/d5ba11b6-79fd-46cb-a949-7903ab082ff3" />
