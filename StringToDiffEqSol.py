@@ -52,9 +52,7 @@ class AutoODE:
     """
 
     def __init__(self):
-        self.ODE = None        # Will hold the compiled f(t, y) function
-        self.order = 0         # Total number of first-order state variables
-        self.state_vars = []   # [(var_name, max_derivative_order), ...]
+        pass
         
     def Help(self):
         print(self.__doc__)
@@ -127,6 +125,15 @@ class AutoODE:
             highest-order derivative cannot be algebraically isolated.
         AssertionError
             If the string preprocessor fails to replace all prime notation.
+
+        Returns
+        -------
+        ODE : callable
+            The compiled right-hand-side function f(t, y) for solve_ivp.
+        state_vars : list of (str, int)
+            List of (variable_name, derivative_order) pairs.
+        order : int
+            Total number of first-order state variables.
 
         Notes
         -----
@@ -356,7 +363,7 @@ class AutoODE:
                 state_index[(name, k)] = idx
                 idx += 1
         total_states = idx
-        self.order = total_states
+        order = total_states
 
         # =====================================================================
         # STEP 7: Build the compiled numerical system function f(t, y)
@@ -457,8 +464,9 @@ class AutoODE:
             return dydt
 
         # Store the compiled system and metadata
-        self.ODE = system
-        self.state_vars = [(name, var_max_order[name]) for name in var_names]
+        ODE = system
+        state_vars = [(name, var_max_order[name]) for name in var_names]
+        return ODE, state_vars, order
 
     def Parse_Local(self, ode_string, function_dict, dim, mod=True):
         """
@@ -553,7 +561,6 @@ class AutoODE:
         After calling this method, self.ODE, self.order, and self.state_vars
         are all set (it delegates to Parse internally).
         """
-        import re
 
         # First pass: detect which function calls contain `i` as an argument.
         # We need to know this before expanding, so we can generate per-index
@@ -657,9 +664,9 @@ class AutoODE:
             equations.append(eq)
 
         # Delegate to Parse with the expanded equation list and functions
-        self.Parse(equations, expanded_funcs)
+        return self.Parse(equations, expanded_funcs)
 
-    def Solve(self, initial_conditions, t_span, t_eval, method='RK45', **kwargs):
+    def Solve(self, ODE, initial_conditions, t_span, t_eval, method='RK45', **kwargs):
         """
         Numerically integrate the parsed ODE system.
 
@@ -706,30 +713,18 @@ class AutoODE:
         RuntimeError
             If Parse has not been called yet.
         """
-        if self.ODE is None:
+        if ODE is None:
             raise RuntimeError("Call Parse first.")
         sol = solve_ivp(
-            self.ODE, t_span, initial_conditions,
+            ODE, t_span, initial_conditions,
             t_eval=t_eval, method=method, dense_output=True, **kwargs
         )
         return sol
     
-    @staticmethod
-    def _parse_single(ode_strings, function_dict):
-        """Worker function for parallel Parse. Returns a configured AutoODE."""
-        ode = AutoODE()
-        ode.Parse(ode_strings, function_dict)
-        return ode
 
-    @staticmethod
-    def _parse_local_single(ode_string, function_dict, dim, mod):
-        """Worker function for parallel Parse_Local. Returns a configured AutoODE."""
-        ode = AutoODE()
-        ode.Parse_Local(ode_string, function_dict, dim, mod)
-        return ode
 
-    @staticmethod
-    def Parallel_Parse(inputs, n_jobs=-1, backend="loky"):
+
+    def Parallel_Parse(self, inputs: list, n_jobs: int = -1, backend: str = "loky") -> list:
         """
         Parse multiple ODE systems in parallel using joblib.
 
@@ -751,8 +746,9 @@ class AutoODE:
 
         Returns
         -------
-        list of AutoODE
-            One configured AutoODE instance per input, in the same order.
+        list of (list of ODEs, list of state_vars, list of orders)
+            Three lists containing ODE functions, state variable lists, and
+            order values for each parsed system, in the same order as inputs.
 
         Example
         -------
@@ -761,14 +757,15 @@ class AutoODE:
         ...     (["x1' - x1 = 0"],  {}),
         ... ], n_jobs=2)
         """
-        results = Parallel(n_jobs=n_jobs, backend=backend)(
-            delayed(AutoODE._parse_single)(ode_strings, function_dict)
+        raw_results = Parallel(n_jobs=n_jobs, backend=backend)(
+            delayed(self.Parse)(ode_strings, function_dict)
             for ode_strings, function_dict in tqdm(inputs, desc="Parsing ODEs")
         )
+        results = list(map(list, zip(*raw_results)))
+        
         return results
 
-    @staticmethod
-    def Parallel_Parse_Local(inputs, n_jobs=-1, backend="threading"):
+    def Parallel_Parse_Local(self, inputs: list, n_jobs: int = -1, backend: str = "threading") -> list:
         """
         Parse multiple local/periodic ODE systems in parallel using joblib.
 
@@ -791,8 +788,9 @@ class AutoODE:
 
         Returns
         -------
-        list of AutoODE
-            One configured AutoODE instance per input, in the same order.
+        list of (list of ODEs, list of state_vars, list of orders)
+            Three lists containing ODE functions, state variable lists, and
+            order values for each parsed system, in the same order as inputs.
 
         Example
         -------
@@ -801,24 +799,17 @@ class AutoODE:
         ...     ("x_i' + x_i = 0", {}, 20, False),
         ... ], n_jobs=2)
         """
-        def _unpack(args):
-            if len(args) == 3:
-                return args[0], args[1], args[2], True
-            return args[0], args[1], args[2], args[3]
 
-        results = Parallel(n_jobs=n_jobs, backend=backend)(
-            delayed(AutoODE._parse_local_single)(*_unpack(inp))
+
+        raw_results = Parallel(n_jobs=n_jobs, backend=backend)(
+            delayed(self.Parse_Local)(*inp)
             for inp in tqdm(inputs, desc="Parsing local ODEs")
         )
+        results = list(map(list, zip(*raw_results)))
+        
         return results
 
-    @staticmethod
-    def _solve_single(ode, initial_conditions, t_span, t_eval, method, kwargs):
-        """Worker function for parallel Solve. Returns solution object."""
-        return ode.Solve(initial_conditions, t_span, t_eval, method=method, **kwargs)
-
-    @staticmethod
-    def Parallel_Solve(ode, inputs, n_jobs=-1, backend="loky"):
+    def Parallel_Solve(self, odes: list, inputs: list, n_jobs: int = -1, backend: str = "loky") -> list:
         """
         Solve the same ODE system with multiple initial conditions in parallel.
 
@@ -877,12 +868,11 @@ class AutoODE:
             t_span = args[1]
             t_eval = args[2]
             method = args[3] if len(args) > 3 else 'RK45'
-            kwargs = args[4] if len(args) > 4 else {}
-            return ic, t_span, t_eval, method, kwargs
-
+            return ic, t_span, t_eval, method
+        
         results = Parallel(n_jobs=n_jobs, backend=backend)(
-            delayed(AutoODE._solve_single)(ode, *_unpack(inp))
-            for inp in tqdm(inputs, desc="Solving ODEs")
+            delayed(self.Solve)(ode, *_unpack(inp))
+            for ode, inp in zip(tqdm(odes, desc="Solving ODEs"), inputs)
         )
         return results
 
@@ -1023,6 +1013,15 @@ class AutoPDE:
             If an equation has no time derivative, or if the time derivative
             cannot be algebraically isolated, or if an unsupported spatial
             derivative order is requested.
+
+        Returns
+        -------
+        ODE : callable
+            The compiled right-hand-side function f(t, y) for solve_ivp.
+        field_vars : list of str
+            List of detected field variable names (e.g., ['u1', 'u2']).
+        order : int
+            Total state dimension (N * n_fields).
 
         Notes
         -----
@@ -1390,13 +1389,19 @@ class AutoPDE:
             return dydt
 
         self.ODE = system
+        self.order = n_fields * N
+        
+        return system, field_vars, self.order
 
-    def Solve(self, initial_conditions, t_span, t_eval, method='RK45', **kwargs):
+    def Solve(self, ODE, initial_conditions, t_span, t_eval, method='RK45', **kwargs):
         """
         Numerically integrate the parsed PDE system.
 
         Parameters
         ----------
+        ODE : callable
+            The compiled f(t, y) function from Parse.
+        
         initial_conditions : array-like
             Initial field values. Can be:
             - 1D array of length N (single field variable)
@@ -1421,7 +1426,7 @@ class AutoPDE:
         sol : OdeSolution
             Solution object. sol.y has shape (n_fields * N, n_times).
         """
-        if self.ODE is None:
+        if ODE is None:
             raise RuntimeError("Call Parse first.")
 
         ic = np.asarray(initial_conditions, dtype=float)
@@ -1436,7 +1441,7 @@ class AutoPDE:
             )
 
         return solve_ivp(
-            self.ODE, t_span, ic,
+            ODE, t_span, ic,
             t_eval=t_eval, method=method, dense_output=True, **kwargs
         )
 
@@ -1465,11 +1470,10 @@ class AutoPDE:
     def _parse_single(pde_strings, function_dict, x_span, N, bc, bc_values):
         """Worker for parallel parsing."""
         pde = AutoPDE()
-        pde.Parse(pde_strings, function_dict, x_span, N, bc, bc_values)
-        return pde
+        return pde.Parse(pde_strings, function_dict, x_span, N, bc, bc_values)
 
     @staticmethod
-    def Parallel_Parse(inputs, n_jobs=-1, backend="loky"):
+    def Parallel_Parse(inputs: list, n_jobs: int = -1, backend: str = "loky") -> list:
         """
         Parse multiple PDE systems in parallel.
 
@@ -1489,7 +1493,9 @@ class AutoPDE:
 
         Returns
         -------
-        list of AutoPDE
+        list of (list of ODEs, list of field_vars, list of orders)
+            Three lists containing ODE functions, field variable lists, and
+            order values for each parsed system, in the same order as inputs.
         """
         def _unpack(args):
             pde_s, fd, xs, n = args[0], args[1], args[2], args[3]
@@ -1497,29 +1503,34 @@ class AutoPDE:
             bv_arg = args[5] if len(args) > 5 else None
             return pde_s, fd, xs, n, bc_arg, bv_arg
 
-        results = Parallel(n_jobs=n_jobs, backend=backend)(
+        raw_results = Parallel(n_jobs=n_jobs, backend=backend)(
             delayed(AutoPDE._parse_single)(*_unpack(inp))
             for inp in tqdm(inputs, desc="Parsing PDEs")
         )
+        results = list(map(list, zip(*raw_results)))
+        
         return results
 
     @staticmethod
-    def _solve_single(pde, initial_conditions, t_span, t_eval, method, kwargs):
+    def _solve_single(pde, ODE, initial_conditions, t_span, t_eval, method, kwargs):
         """Worker function for parallel Solve. Returns solution object."""
-        return pde.Solve(initial_conditions, t_span, t_eval, method=method, **kwargs)
+        return pde.Solve(ODE, initial_conditions, t_span, t_eval, method=method, **kwargs)
 
     @staticmethod
-    def Parallel_Solve(pde, inputs, n_jobs=-1, backend="loky"):
+    def Parallel_Solve(pdes: list, odes: list, inputs: list, n_jobs: int = -1, backend: str = "loky") -> list:
         """
-        Solve the same PDE system with multiple initial conditions in parallel.
+        Solve multiple PDE systems with corresponding initial conditions in parallel.
 
         This is useful for parameter sweeps, ensemble simulations, studying
         different initial profiles, or Monte Carlo analysis of PDE systems.
 
         Parameters
         ----------
-        pde : AutoPDE
-            A configured AutoPDE instance (Parse already called).
+        pdes : list of AutoPDE
+            List of configured AutoPDE instances (one per solve).
+            
+        odes : list of callable
+            List of ODE functions from Parse (one per solve).
 
         inputs : list of tuples
             Each element is a tuple of arguments for the Solve method:
@@ -1556,18 +1567,33 @@ class AutoPDE:
 
         Example
         -------
-        >>> pde = AutoPDE()
-        >>> pde.Parse("u1_t - 0.01*u1_xx = 0", {}, (0, 1), 100, bc='periodic')
-        >>> x = pde.x_grid
+        >>> # First parse multiple PDE systems
+        >>> inputs_parse = [
+        ...     ("u1_t - 0.01*u1_xx = 0", {}, (0, 1), 100, 'periodic'),
+        ...     ("u1_t - 0.01*u1_xx = 0", {}, (0, 1), 100, 'periodic'),
+        ...     ("u1_t - 0.01*u1_xx = 0", {}, (0, 1), 100, 'periodic')
+        ... ]
+        >>> odes, field_vars_list, orders = AutoPDE.Parallel_Parse(inputs_parse, n_jobs=3)
+        >>> 
+        >>> # Create PDE instances (needed to access x_grid, etc.)
+        >>> pdes = []
+        >>> for i in range(3):
+        ...     pde = AutoPDE()
+        ...     pde.Parse(*inputs_parse[i])
+        ...     pdes.append(pde)
+        >>> 
         >>> # Different initial profiles
+        >>> x = pdes[0].x_grid
         >>> u0_1 = np.sin(2*np.pi*x)
         >>> u0_2 = np.sin(4*np.pi*x)
         >>> u0_3 = np.exp(-((x-0.5)/0.1)**2)
         >>> t_eval = np.linspace(0, 0.5, 100)
-        >>> inputs = [(u0_1, (0, 0.5), t_eval),
-        ...           (u0_2, (0, 0.5), t_eval),
-        ...           (u0_3, (0, 0.5), t_eval)]
-        >>> solutions = AutoPDE.Parallel_Solve(pde, inputs, n_jobs=3)
+        >>> 
+        >>> # Solve all three systems
+        >>> inputs_solve = [(u0_1, (0, 0.5), t_eval),
+        ...                 (u0_2, (0, 0.5), t_eval),
+        ...                 (u0_3, (0, 0.5), t_eval)]
+        >>> solutions = AutoPDE.Parallel_Solve(pdes, odes, inputs_solve, n_jobs=3)
         """
         def _unpack(args):
             ic = args[0]
@@ -1578,8 +1604,8 @@ class AutoPDE:
             return ic, t_span, t_eval, method, kwargs
 
         results = Parallel(n_jobs=n_jobs, backend=backend)(
-            delayed(AutoPDE._solve_single)(pde, *_unpack(inp))
-            for inp in tqdm(inputs, desc="Solving PDEs")
+            delayed(AutoPDE._solve_single)(pde, ode, *_unpack(inp))
+            for pde, ode, inp in zip(tqdm(pdes, desc="Solving PDEs"), odes, inputs)
         )
         return results
 
@@ -1631,7 +1657,8 @@ if __name__ == "__main__":
     # --- Parallel parse ---
     print(f"Parallel-parsing {n_instances} Lorenz 63 instances ...")
     start_parse = time.perf_counter()
-    odes = AutoODE.Parallel_Parse(inputs, n_jobs=-1, backend="threading")
+    ODE = AutoODE()
+    odes = ODE.Parallel_Parse(inputs, n_jobs=-1, backend="threading")[0]
     t_parse = time.perf_counter() - start_parse
     print(f"  Parallel parse: {t_parse:.3f} s")
     
@@ -1647,9 +1674,8 @@ if __name__ == "__main__":
     start_solve = time.perf_counter()
     # Note: We need to solve each ODE instance separately, so we'll still loop
     # but demonstrate Parallel_Solve concept with the first ODE instance
-    solutions = []
-    for ode in tqdm(odes, desc="Solving"):
-        solutions.append(ode.Solve(ic, t_span, t_eval))
+    solutions = ODE.Parallel_Solve(odes, solve_inputs, n_jobs=-1, backend="threading")
+    ODE.Solve
     t_solve = time.perf_counter() - start_solve
     print(f"  Solve time: {t_solve:.3f} s")
 
@@ -1709,7 +1735,7 @@ if __name__ == "__main__":
 
     # --- Parse the coupled PDE system ---
     pde = AutoPDE()
-    pde.Parse(
+    pde_ode, field_vars, order = pde.Parse(
         [f"u1_t + {alpha}*u2_xx = 0",
          f"u2_t - {alpha}*u1_xx = 0"],
         {},
@@ -1727,7 +1753,7 @@ if __name__ == "__main__":
     z_eval = np.linspace(0, z_max, n_z)
     print(f"Propagating {N_pde}-point field over z = [0, {z_max}] ...")
     start_pde_solve = time.perf_counter()
-    sol_pde = pde.Solve(ic_pde, (0, z_max), z_eval,
+    sol_pde = pde.Solve(pde_ode, ic_pde, (0, z_max), z_eval,
                         method='DOP853', rtol=1e-8, atol=1e-10)
     t_solve = time.perf_counter() - start_pde_solve
     print(f"  Solve time: {t_solve:.2f} s")
