@@ -19,4 +19,6 @@ PDE example:
 
 
 __main__ contains a Double Slit experiment, generated via the AutoPDE class.
+
   
+<img width="1700" height="500" alt="DSE" src="https://github.com/user-attachments/assets/ac49a869-5d97-44a0-b551-4d77d63157eb" />
