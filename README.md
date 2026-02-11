@@ -1,4 +1,4 @@
-Code relies on Sympy, re, script.integrate.solve_ivp. This project was meant as a Claude Sonnet 4.6 test, but after thorough inspection and testing it became clear that it provided a useful and effective tool for real-world use.
+Code relies on Numpy, Sympy, Regex, and Scipy. This project was meant as a Claude Sonnet 4.6 test, but after thorough inspection and testing it became clear that it provided a useful and effective tool for real-world use.
 
 Allows for ordinary- or partial differential equations to be converted from string to solution.
 Ideal for rapid scientific and Machine Learning dataset construction, or teaching purposes.
