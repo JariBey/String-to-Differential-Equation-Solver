@@ -1432,6 +1432,100 @@ class AutoPDE:
 if __name__ == "__main__":
     import time
     import matplotlib.pyplot as plt
+    
+    
+    # =========================================================================
+    # Test Parallel_Parse with many Lorenz 63 instances
+    # =========================================================================
+    # Lorenz 63:
+    #   x1' = sigma*(x2 - x1)
+    #   x2' = x1*(rho - x3) - x2
+    #   x3' = x1*x2 - beta*x3
+    #
+    # We sweep over different (sigma, rho, beta) parameter combinations and
+    # parse + solve each instance in parallel.
+
+    n_instances = 50
+    np.random.seed(0)
+
+    # Random parameter variations around the classic values
+    sigmas = 10.0 + 2.0 * np.random.randn(n_instances)
+    rhos   = 28.0 + 4.0 * np.random.randn(n_instances)
+    betas  = 8/3  + 0.5 * np.random.randn(n_instances)
+
+    # -- Build inputs for Parallel_Parse --
+    # Each Lorenz 63 system uses three "constant" coefficient functions.
+    # We use the threading backend so lambdas are supported.
+    lorenz_eqs = [
+        "x1' - s(t)*(x2 - x1) = 0",
+        "x2' - x1*r(t) + x1*x3 + x2 = 0",
+        "x3' - x1*x2 + b(t)*x3 = 0",
+    ]
+    inputs = [
+        (
+            lorenz_eqs,
+            {
+                "s": lambda t, _s=s: _s,
+                "r": lambda t, _r=r: _r,
+                "b": lambda t, _b=b: _b,
+            },
+        )
+        for s, r, b in zip(sigmas, rhos, betas)
+    ]
+
+    # --- Parallel parse ---
+    print(f"Parallel-parsing {n_instances} Lorenz 63 instances ...")
+    t0 = time.perf_counter()
+    odes = AutoODE.Parallel_Parse(inputs, n_jobs=-1, backend="threading")
+    t_parse = time.perf_counter() - t0
+    print(f"  Parallel parse: {t_parse:.3f} s")
+
+    # --- Sequential parse (for comparison) ---
+    print(f"Sequential-parsing {n_instances} Lorenz 63 instances ...")
+    t0 = time.perf_counter()
+    odes_seq = []
+    for ode_strs, fdict in tqdm(inputs, desc="Sequential parse"):
+        o = AutoODE()
+        o.Parse(ode_strs, fdict)
+        odes_seq.append(o)
+    t_seq = time.perf_counter() - t0
+    print(f"  Sequential parse: {t_seq:.3f} s")
+    print(f"  Speedup: {t_seq / t_parse:.2f}x")
+
+    # --- Solve all instances ---
+    t_span = (0, 25)
+    t_eval = np.linspace(0, 25, 2000)
+    ic = [1.0, 1.0, 1.0]  # same IC for all
+
+    print(f"\nSolving {n_instances} systems ...")
+    solutions = []
+    for ode in tqdm(odes, desc="Solving"):
+        solutions.append(ode.Solve(ic, t_span, t_eval))
+
+    # --- Plot a selection of trajectories ---
+    fig = plt.figure(figsize=(14, 5))
+
+    # 3D phase portrait for a few instances
+    ax1 = fig.add_subplot(1, 2, 1, projection='3d')
+    for i in range(min(8, n_instances)):
+        sol = solutions[i]
+        ax1.plot(sol.y[0], sol.y[1], sol.y[2], lw=0.4, alpha=0.8,
+                 label=f'σ={sigmas[i]:.1f} ρ={rhos[i]:.1f}')
+    ax1.set_xlabel('x1')
+    ax1.set_ylabel('x2')
+    ax1.set_zlabel('x3')
+    ax1.set_title(f'Lorenz 63 — {min(8, n_instances)} instances')
+    ax1.legend(fontsize=6, loc='upper left')
+
+    # Time series of x1 for all instances (spaghetti plot)
+    ax2 = fig.add_subplot(1, 2, 2)
+    for i, sol in enumerate(solutions):
+        ax2.plot(sol.t, sol.y[0], lw=0.3, alpha=0.6)
+    ax2.set_xlabel('t')
+    ax2.set_ylabel('x1')
+    ax2.set_title(f'Lorenz 63 — x1(t) for {n_instances} instances')
+
+    plt.tight_layout()
 
     # =========================================================================
     # Double Slit Experiment — Beam Propagation Method (AutoPDE)
