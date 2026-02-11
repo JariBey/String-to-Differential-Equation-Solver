@@ -1479,19 +1479,6 @@ if __name__ == "__main__":
     odes = AutoODE.Parallel_Parse(inputs, n_jobs=-1, backend="threading")
     t_parse = time.perf_counter() - t0
     print(f"  Parallel parse: {t_parse:.3f} s")
-
-    # --- Sequential parse (for comparison) ---
-    print(f"Sequential-parsing {n_instances} Lorenz 63 instances ...")
-    t0 = time.perf_counter()
-    odes_seq = []
-    for ode_strs, fdict in tqdm(inputs, desc="Sequential parse"):
-        o = AutoODE()
-        o.Parse(ode_strs, fdict)
-        odes_seq.append(o)
-    t_seq = time.perf_counter() - t0
-    print(f"  Sequential parse: {t_seq:.3f} s")
-    print(f"  Speedup: {t_seq / t_parse:.2f}x")
-
     # --- Solve all instances ---
     t_span = (0, 25)
     t_eval = np.linspace(0, 25, 2000)
