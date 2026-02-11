@@ -1,3 +1,5 @@
+Code relies on Sympy, re, script.integrate.solve_ivp. This project was meant as a Claude Sonnet 4.6 test, but after thorough inspection and testing it provided a useful and effective tool for real-world use.
+
 Allows for any ordinary- or partial differential equation to be converted from string to solution.
 Ideal for rapid scientific or Machine Learning dataset construction.
 
@@ -25,3 +27,5 @@ Result:
 <img width="1400" height="500" alt="L63E" src="https://github.com/user-attachments/assets/ae1c71dc-966a-4258-b19f-63a047419664" />
 
 <img width="1700" height="500" alt="DSE" src="https://github.com/user-attachments/assets/d5ba11b6-79fd-46cb-a949-7903ab082ff3" />
+
+
