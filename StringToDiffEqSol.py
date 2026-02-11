@@ -1526,8 +1526,6 @@ if __name__ == "__main__":
     axes[2].set_xlim(-L, L)
 
     fig.suptitle('Double Slit Experiment — Paraxial Wave Propagation (AutoPDE)',
-                 fontsize=13, y=1.02)
+                 fontsize=13, y=0.98)  # <-- Increased y to avoid cutoff
     plt.tight_layout()
     plt.show()
-
-  
