@@ -25,7 +25,7 @@ PDE example:
 
 Detailed documentation is present in the class functions.
 
-__main__ contains a Lorenz63 dataset generated via the AutoODE class, and the Double Slit Experiment generated via the AutoPDE class.
+__main__ contains a Lorenz63 dataset generated via the AutoODE class; the Double Slit Experiment and a wave equation generated via the AutoPDE class.
 
 Result:
 
@@ -33,4 +33,5 @@ Result:
 
 <img width="1700" height="500" alt="DSE" src="https://github.com/user-attachments/assets/d5ba11b6-79fd-46cb-a949-7903ab082ff3" />
 
+<img width="1700" height="400" alt="WE" src="https://github.com/user-attachments/assets/f669d5b8-31a9-4977-a870-6e8409c1bf28" />
 
