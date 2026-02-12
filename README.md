@@ -10,18 +10,19 @@ AutoPDE allows for the conversion of any order coupled 1D partial differential e
 ODE example:
 
     >>> ode = AutoODE()
-    >>> ode.Parse(
+    >>> dydt,bar,order = ode.Parse(
     ...     ["x1'' + 0.1*x1' + x1 - F(t) = 0"],
     ...     {"F": lambda t: np.sin(t)}
     ... )
-    >>> sol = ode.Solve([1.0, 0.0], (0, 20), np.linspace(0, 20, 1000))
+    >>> sol = ode.Solve(dust, [1.0, 0.0], (0, 20),
+np.linspace(0, 20, 1000))
 
 PDE example:
 
     >>> pde = AutoPDE()
-    >>> pde.Parse("u1_t - 0.01*u1_xx = 0", {}, (0, 1), 100, bc='dirichlet')
+    >>> dydt, vars, order = pde.Parse("u1_t - 0.01*u1_xx = 0", {}, (0, 1), 100, bc='dirichlet')
     >>> u0 = np.sin(np.pi * pde.x_grid)
-    >>> sol = pde.Solve(u0, (0, 0.5), np.linspace(0, 0.5, 100))
+    >>> sol = pde.Solve(dydt, u0, (0, 0.5), np.linspace(0, 0.5, 100))
 
 Detailed documentation is present in the class functions.
 
